@@ -47,7 +47,7 @@
 #include <SparkFun_AS7265X.h>
 
 #define USE_DISPLAY 1
-#define FW_VERSION "2.5.3"
+#define FW_VERSION "2.6.0"
 
 // ---------------------------------------------------------------------------------------------
 // Board
@@ -362,6 +362,114 @@ void spStep(uint32_t now) {
 
 // =============================================================================================
 // Display
+// =============================================================================================
+// Sunglasses tester (screen 3): relative transmission per light source
+//   IO14 short: 1st press = reference (no lens), next presses = measure the lens
+//   IO14 long (>0.7 s): next light source      BOOT long: clear all references
+const char *GL_NAMES[9] = {"255nm", "365nm", "380nm", "390nm", "400nm", "410nm", "420nm", "BIALE", "SLONCE"};
+const int GL_N = 9, GL_LEDS = 7;
+const int GL_NM[9] = {255, 365, 380, 390, 400, 410, 420, 0, 0};
+// CIE V(lambda) at the triad channels (410 ... 940 nm)
+const float GL_V[18] = {0.00121f, 0.01684f, 0.06f, 0.1693f, 0.503f, 0.91485f, 0.995f, 0.8163f, 0.503f, 0.1382f, 0.017f, 0.002929f, 0.00052f, 0.00006f, 0, 0, 0, 0};
+int glSrc = 1;
+bool glHasRef[9], glHasLens[9];
+float glRefUv[9][3], glRefSp[9][18], glLensUv[9][3], glLensSp[9][18];
+float glTau[9];    // LED: transmission, broadband: tau_v (-1 = none)
+float glUva[9];    // broadband: UVA transmission (-1 = none)
+// running average of the last 4 readings
+const int GL_AVG = 4;
+float glBufUv[GL_AVG][3], glBufSp[GL_AVG][18];
+int glNUv = 0, glNSp = 0, glIUv = 0, glISp = 0;
+
+void glPushUv() {
+  for (int c = 0; c < 3; c++) glBufUv[glIUv][c] = uvLast[c];
+  glIUv = (glIUv + 1) % GL_AVG;
+  if (glNUv < GL_AVG) glNUv++;
+}
+void glPushSp() {
+  for (int c = 0; c < 18; c++) glBufSp[glISp][c] = spLast[c];
+  glISp = (glISp + 1) % GL_AVG;
+  if (glNSp < GL_AVG) glNSp++;
+}
+void glAverage(float *uvOut, float *spOut) {
+  for (int c = 0; c < 3; c++) {
+    float a = 0;
+    for (int i = 0; i < glNUv; i++) a += glBufUv[i][c];
+    uvOut[c] = glNUv ? a / glNUv : 0;
+  }
+  for (int c = 0; c < 18; c++) {
+    float a = 0;
+    for (int i = 0; i < glNSp; i++) a += glBufSp[i][c];
+    spOut[c] = glNSp ? a / glNSp : 0;
+  }
+}
+
+// LED: weighted mean of tau over the channels that clearly see the LED in the reference
+float glLedTau(int s) {
+  float num = 0, den = 0;
+  float mu = 0, ms = 0;
+  for (int c = 0; c < 3; c++) mu = max(mu, glRefUv[s][c]);
+  for (int c = 0; c < 18; c++) ms = max(ms, glRefSp[s][c]);
+  if (uvOk && mu > 0.05f)
+    for (int c = 0; c < 3; c++)
+      if (glRefUv[s][c] > 0.05f && glRefUv[s][c] >= 0.1f * mu) { num += max(0.0f, glLensUv[s][c]); den += glRefUv[s][c]; }
+  if (spOk && ms > 0.5f)
+    for (int c = 0; c < 18; c++)
+      if (glRefSp[s][c] > 0.5f && glRefSp[s][c] >= 0.1f * ms) { num += max(0.0f, glLensSp[s][c]); den += glRefSp[s][c]; }
+  return den > 0 ? num / den : -1;
+}
+float glTauV(int s) {
+  float num = 0, den = 0;
+  for (int c = 0; c < 18; c++)
+    if (glRefSp[s][c] > 0.5f) { num += GL_V[c] * max(0.0f, glLensSp[s][c]); den += GL_V[c] * glRefSp[s][c]; }
+  return den > 0 ? num / den : -1;
+}
+int glCategory(float tv) { return tv > 0.8f ? 0 : tv > 0.43f ? 1 : tv > 0.18f ? 2 : tv > 0.08f ? 3 : tv > 0.03f ? 4 : 5; }
+
+void glCapture() {
+  float u[3], sp[18];
+  glAverage(u, sp);
+  int s = glSrc;
+  if (!glHasRef[s]) {
+    memcpy(glRefUv[s], u, sizeof u);
+    memcpy(glRefSp[s], sp, sizeof sp);
+    glHasRef[s] = true;
+    glHasLens[s] = false;
+    Serial.printf("#GL ref %s\n", GL_NAMES[s]);
+    return;
+  }
+  memcpy(glLensUv[s], u, sizeof u);
+  memcpy(glLensSp[s], sp, sizeof sp);
+  glHasLens[s] = true;
+  if (s < GL_LEDS) {
+    glTau[s] = glLedTau(s);
+  } else {
+    glTau[s] = glTauV(s);
+    glUva[s] = glRefUv[s][0] > 0.5f ? max(0.0f, glLensUv[s][0]) / glRefUv[s][0] : -1;
+  }
+  Serial.printf("#GL lens %s tau=%.5f\n", GL_NAMES[s], glTau[s]);
+}
+void glClear() {
+  for (int i = 0; i < GL_N; i++) { glHasRef[i] = glHasLens[i] = false; glTau[i] = -1; glUva[i] = -1; }
+}
+
+// Verdict over the measured UV points (LEDs 365-400 nm and broadband UVA)
+// 0 = none, 1 = UV400, 2 = good (<=5 %), 3 = weak, 4 = harmful (more UV than visible)
+int glVerdict(float *maxUvOut) {
+  float mx = -1, tv = -1;
+  for (int i = 1; i <= 4; i++) if (glHasLens[i] && glTau[i] >= 0) mx = max(mx, glTau[i]);
+  for (int i = 7; i <= 8; i++) {
+    if (glHasLens[i] && glUva[i] >= 0) mx = max(mx, glUva[i]);
+    if (glHasLens[i] && glTau[i] >= 0) tv = glTau[i];
+  }
+  *maxUvOut = mx;
+  if (mx < 0) return 0;
+  if (tv >= 0 && mx > tv && mx > 0.05f) return 4;
+  if (mx <= 0.01f && glHasLens[4]) return 1;
+  if (mx <= 0.05f) return 2;
+  return 3;
+}
+
 #if USE_DISPLAY
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -423,7 +531,7 @@ class LGFX_TDisplayS3 : public lgfx::LGFX_Device {
 LGFX_TDisplayS3 lcd;
 LGFX_Sprite canvas(&lcd);
 bool canvasOk = false;
-int screen = 0; // 0 = both sensors on one screen, 1 = AS7331 large, 2 = AS7265x large
+int screen = 0; // 0 = both sensors on one screen, 1 = AS7331 large, 2 = AS7265x large, 3 = sunglasses tester
 
 static const uint16_t COL_BG = 0x0841;
 static const uint16_t COL_TXT = 0xEF7D;
@@ -601,11 +709,102 @@ void drawBoth() {
   }
 }
 
-// Next available screen for the BOOT button: both (only with two sensors) -> UV -> triad
+#if USE_DISPLAY
+void glPct(float v, char *out, size_t n) {
+  if (v < 0) snprintf(out, n, "--");
+  else if (v < 0.1f) snprintf(out, n, "%.2f%%", v * 100);
+  else snprintf(out, n, "%.0f%%", v * 100);
+}
+
+void drawGlasses() {
+  char title[40];
+  snprintf(title, sizeof title, "OKULARY  %s", GL_NAMES[glSrc]);
+  drawHeader(title);
+  int s = glSrc;
+  canvas.setFont(&fonts::Font2);
+  canvas.setTextDatum(textdatum_t::top_left);
+  if (s == 0) {
+    canvas.setTextColor(0xF800, COL_BG);
+    canvas.drawString("UVC! Chron oczy i skore", 6, 22);
+  } else {
+    canvas.setTextColor(COL_MUTED, COL_BG);
+    canvas.drawString(!glHasRef[s] ? "IO14: odniesienie (bez soczewki)" : "IO14: zmierz soczewke   dlugo: zrodlo", 6, 22);
+  }
+  // result of the current source
+  char a[16], b[24];
+  canvas.setFont(&fonts::Font4);
+  canvas.setTextColor(COL_TXT, COL_BG);
+  if (glHasLens[s] && glTau[s] >= 0) {
+    glPct(glTau[s], a, sizeof a);
+    if (s < GL_LEDS) {
+      glPct(max(0.0f, 1 - glTau[s]), b, sizeof b);
+      char line[48];
+      snprintf(line, sizeof line, "T %s  blok %s", a, b);
+      canvas.drawString(line, 6, 42);
+    } else {
+      char line[48];
+      int cat = glCategory(glTau[s]);
+      if (cat > 4) snprintf(line, sizeof line, "Tv %s  kat >4", a);
+      else snprintf(line, sizeof line, "Tv %s  kat %d", a, cat);
+      canvas.drawString(line, 6, 42);
+    }
+  } else {
+    canvas.setTextColor(COL_MUTED, COL_BG);
+    canvas.drawString(glHasRef[s] ? "odniesienie OK" : "brak odniesienia", 6, 42);
+  }
+  // transmission bars of the LED points (log scale 0.1 % .. 100 %)
+  const int x0 = 8, base = 150, hmax = 62, w = 26;
+  for (int i = 0; i < GL_LEDS; i++) {
+    int x = x0 + i * (w + 4);
+    if (glHasLens[i] && glTau[i] >= 0) {
+      float lv = log10f(max(glTau[i] * 100, 0.1f));  // -1 .. 2
+      int h = (int)(hmax * (lv + 1) / 3.0f);
+      uint16_t col = glTau[i] <= 0.01f ? 0x07E0 : glTau[i] <= 0.05f ? 0xFFE0 : 0xF800;
+      canvas.fillRect(x, base - h, w, h, col);
+    } else if (glHasRef[i]) {
+      canvas.drawRect(x, base - 4, w, 4, COL_MUTED);
+    }
+    if (i == glSrc) canvas.drawRect(x - 2, base - hmax - 2, w + 4, hmax + 4, COL_TXT);
+    canvas.setFont(&fonts::Font0);
+    canvas.setTextColor(COL_MUTED, COL_BG);
+    canvas.setTextDatum(textdatum_t::top_center);
+    char lab[6];
+    snprintf(lab, sizeof lab, "%d", GL_NM[i]);
+    canvas.drawString(lab, x + w / 2, base + 4);
+  }
+  // verdict
+  float mx;
+  int v = glVerdict(&mx);
+  const char *txt[5] = {"UV: brak pomiaru", "UV400  OK", "UV dobra ochrona", "UV SLABA ochrona", "SZKODLIWE!"};
+  uint16_t col[5] = {COL_MUTED, 0x07E0, 0x07E0, 0xFD20, 0xF800};
+  canvas.setFont(&fonts::Font2);
+  canvas.setTextDatum(textdatum_t::top_left);
+  canvas.setTextColor(col[v], COL_BG);
+  canvas.drawString(txt[v], 222, 80);
+  if (mx >= 0) {
+    glPct(mx, a, sizeof a);
+    char line[24];
+    snprintf(line, sizeof line, "max %s", a);
+    canvas.drawString(line, 222, 98);
+  }
+  for (int i = 7; i <= 8; i++) {
+    if (glHasLens[i] && glTau[i] >= 0) {
+      glPct(glTau[i], a, sizeof a);
+      char line[24];
+      snprintf(line, sizeof line, "Tv %s", a);
+      canvas.setTextColor(COL_TXT, COL_BG);
+      canvas.drawString(line, 222, 120);
+      break;
+    }
+  }
+}
+#endif
+
+// Next available screen for the BOOT button: both (only with two sensors) -> UV -> triad -> glasses
 int nextScreen(int cur) {
-  for (int k = 1; k <= 3; k++) {
-    int s = (cur + k) % 3;
-    if ((s == 0 && uvOk && spOk) || (s == 1 && uvOk) || (s == 2 && spOk)) return s;
+  for (int k = 1; k <= 4; k++) {
+    int s = (cur + k) % 4;
+    if ((s == 0 && uvOk && spOk) || (s == 1 && uvOk) || (s == 2 && spOk) || (s == 3 && (uvOk || spOk))) return s;
   }
   return cur;
 }
@@ -613,6 +812,7 @@ int nextScreen(int cur) {
 void drawScreen() {
   if (!canvasOk) return;
   if (!uvOk && !spOk) drawNoSensor();
+  else if (screen == 3) drawGlasses();
   else if (screen == 0 && uvOk && spOk) drawBoth();
   else if (screen == 2 && spOk) drawTriad();
   else if (uvOk) drawUv();
@@ -759,11 +959,18 @@ void initSensors() {
 // (one per 250 ms, ignored during the first second after start-up); the loop handles it.
 struct Button {
   int pin;
-  volatile bool flag = false;
-  volatile uint32_t lastAt = 0;
+  volatile bool flag = false;      // short press (released before 0.7 s)
+  volatile bool longFlag = false;  // long press
+  volatile uint32_t downAt = 0;
+  volatile bool down = false;
   bool pressed() {
     if (!flag) return false;
     flag = false;
+    return true;
+  }
+  bool longPressed() {
+    if (!longFlag) return false;
+    longFlag = false;
     return true;
   }
 };
@@ -772,9 +979,17 @@ Button btnHold{PIN_BUTTON_HOLD}, btnScreen{PIN_BUTTON_SCREEN};
 void IRAM_ATTR buttonIsr(void *arg) {
   Button *b = (Button *)arg;
   uint32_t now = millis();
-  if (now > 1000 && now - b->lastAt > 250) {
-    b->lastAt = now;
-    b->flag = true;
+  if (now < 1000) return;
+  bool level = digitalRead(b->pin);
+  if (!level && !b->down) {  // pressed
+    b->down = true;
+    b->downAt = now;
+  } else if (level && b->down) {  // released
+    b->down = false;
+    uint32_t d = now - b->downAt;
+    if (d < 30) return;  // bounce
+    if (d >= 700) b->longFlag = true;
+    else b->flag = true;
   }
 }
 
@@ -783,8 +998,9 @@ void setup() {
   digitalWrite(PIN_POWER_ON, HIGH);
   pinMode(PIN_BUTTON_HOLD, INPUT_PULLUP);
   pinMode(PIN_BUTTON_SCREEN, INPUT_PULLUP);
-  attachInterruptArg(digitalPinToInterrupt(PIN_BUTTON_HOLD), buttonIsr, &btnHold, FALLING);
-  attachInterruptArg(digitalPinToInterrupt(PIN_BUTTON_SCREEN), buttonIsr, &btnScreen, FALLING);
+  attachInterruptArg(digitalPinToInterrupt(PIN_BUTTON_HOLD), buttonIsr, &btnHold, CHANGE);
+  attachInterruptArg(digitalPinToInterrupt(PIN_BUTTON_SCREEN), buttonIsr, &btnScreen, CHANGE);
+  glClear();
 #if ARDUINO_USB_CDC_ON_BOOT
   Serial.setTxBufferSize(2048);
 #endif
@@ -821,18 +1037,19 @@ void loop() {
 
   readSerial();
 
-  if (btnHold.pressed()) {
+  bool holdShort = btnHold.pressed(), holdLong = btnHold.longPressed();
+  bool scrShort = btnScreen.pressed(), scrLong = btnScreen.longPressed();
+  if (screen == 3) {  // sunglasses tester
+    if (holdShort) glCapture();
+    if (holdLong) glSrc = (glSrc + 1) % GL_N;
+    if (scrLong) glClear();
+  } else if (holdShort || holdLong) {
     hold = !hold;
-#if USE_DISPLAY
-    drawScreen();
-#endif
   }
-  if (btnScreen.pressed()) {
+  if (scrShort) screen = nextScreen(screen);
 #if USE_DISPLAY
-    screen = nextScreen(screen);
-    drawScreen();
+  if (holdShort || holdLong || scrShort || scrLong) drawScreen();
 #endif
-  }
 
 #if USE_DISPLAY
   // Refresh the display on its own clock, independent of the measurement and the USB link
@@ -862,5 +1079,7 @@ void loop() {
   }
   lastMeas = millis();
   if (uvOk) uvStep(lastMeas);
+  if (uvOk) glPushUv();
   if (spOk) spStep(lastMeas);
+  if (spOk) glPushSp();
 }

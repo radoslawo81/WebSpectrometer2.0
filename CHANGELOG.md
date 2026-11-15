@@ -2,6 +2,11 @@
 
 All notable changes of WebSpectrometer2.0. Versions before 2.0.0 were published as the fork `radoslawo81/WebSpectrometer`.
 
+## 2.6.0 – 2026-11-15
+
+- **Sunglasses tester** (*Tools → Sensors → Sunglasses tester* tab): reference without the lens and measurement with the lens for each light source – LED illuminator 255 / 365 / 380 / 390 / 400 / 410 / 420 nm (one point of the transmission curve each) and a white lamp or sunlight (luminous transmittance τv, filter category 0–4, blue light 410–460 nm, IR, broadband UVA / UVB). UV verdict: UV400 / good / weak / harmful (more UV than visible light), transmission curve on a log scale, comparison table of several pairs, CSV
+- Firmware: sunglasses screen “OKULARY” (BOOT cycles to it): IO14 short = reference, then measure; IO14 long = next light source; BOOT long = clear the references. Long / short presses on both buttons. Version 2.6.0
+
 ## 2.5.3 – 2026-11-14
 
 - Firmware: buttons on interrupts – presses are no longer lost while a measurement blocks the loop (up to ~0.5 s with both sensors)

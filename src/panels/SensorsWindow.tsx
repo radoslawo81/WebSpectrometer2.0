@@ -25,6 +25,7 @@ import type { UvReading } from '../serial/uvSensor'
 import { barDensity, triadBarsOf, uvBarsOf, UV_CH, TRIAD_LETTERS, type SensorBar } from '../core/sensorBands'
 import { setRuntime, setSettings, useAppState } from '../app/store'
 import { useWindowPos } from './useWindowPos'
+import { GlassesTester } from './GlassesTester'
 import { computeTriadCorr, parseTriadCorr } from '../core/triadCorr'
 
 const UV_GAINS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -165,6 +166,7 @@ export function SensorsWindow({ onClose }: { onClose: () => void }) {
   const [showTable, setShowTable] = useState(false)
   const [withUv, setWithUv] = useState(true)
   const [msg, setMsg] = useState<string | null>(null)
+  const [tab, setTab] = useState<'sensors' | 'glasses'>('sensors')
   const [corrT, setCorrT] = useState('')
   const supported = typeof navigator !== 'undefined' && 'serial' in navigator
 
@@ -268,6 +270,18 @@ export function SensorsWindow({ onClose }: { onClose: () => void }) {
         {!supported && <div style={{ color: 'rgb(190,0,0)', fontSize: 11 }}>{t('Uv_NoSerial')}</div>}
         {uv.message && <div style={{ fontSize: 11, color: uv.messageIsError ? 'rgb(190,0,0)' : 'var(--text-muted)' }}>{uv.message}</div>}
 
+        <div className="field-row" style={{ gap: 4 }}>
+          <ToggleButton active={tab === 'sensors'} onClick={() => setTab('sensors')}>
+            {t('Sen_TabSensors')}
+          </ToggleButton>
+          <ToggleButton active={tab === 'glasses'} onClick={() => setTab('glasses')}>
+            {t('Sen_TabGlasses')}
+          </ToggleButton>
+        </div>
+        {tab === 'glasses' ? (
+          <GlassesTester />
+        ) : (
+          <>
         {bars.length ? (
           <Chart bars={bars} log={log} density={density} />
         ) : (
@@ -487,6 +501,8 @@ export function SensorsWindow({ onClose }: { onClose: () => void }) {
         {msg && <div style={{ fontSize: 11 }}>{msg}</div>}
         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('Sen_Hint').replace('{n}', String(AVG_N))}</div>
         {uv.info && <div style={{ fontSize: 11, color: 'rgb(160,90,0)' }}>{t('Uv_Safety')}</div>}
+          </>
+        )}
       </div>
     </FloatingWindow>
   )
